@@ -1,2 +1,2 @@
-python-telegram-bot==20.7
-pillow==9.5.0
+python-telegram-bot==20.3
+Pillow==8.4.0

@@ -1,9 +1,4 @@
 # bot.py
-# Полный рабочий "Крипта 1" сканер — адаптирован под python-telegram-bot v20+
-# Требования: requirements.txt (ptb 20.7, requests, aiohttp)
-# ENV: BOT_TOKEN (обязательно), ADMIN_CHAT_ID (опционально)
-# Файлы: config.json (опционально), stats.json (создаётся автоматически)
-
 import os
 import json
 import time
@@ -15,16 +10,13 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ---------- Логи ----------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Крипта1")
+logger = logging.getLogger("Kрипта1")
 
-# ---------- Константы / файлы ----------
 STATS_FILE = "stats.json"
 CONFIG_FILE = "config.json"
 CODEWORD = "Крипта 1"
 
-# ---------- Утилиты ----------
 def load_json_safe(path: str, default):
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
@@ -40,7 +32,6 @@ def save_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ---------- Статистика ----------
 def load_stats():
     default = {"codeword": CODEWORD, "entries": [], "summary": {"total":0,"correct":0,"incorrect":0}}
     return load_json_safe(STATS_FILE, default)
@@ -65,7 +56,6 @@ def record_entry(pair_label: str, url: str, chain: str, tf: str, answer: str, x_
     save_stats(data)
     logger.info("REC: %s %s %s => %s x=%s", pair_label, chain, tf, answer, x_multiplier)
 
-# ---------- Default config ----------
 DEFAULT_CONFIG = {
     "scan_interval_seconds": 60,
     "new_pairs_interval_seconds": 10,
@@ -76,7 +66,6 @@ DEFAULT_CONFIG = {
     "min_buyers_recent": 8,
     "required_buyers_for_strong": 15,
     "consecutive_bull_candles": 2,
-    "max_recent_drawdown_pct": 30,
     "prefer_hours": None,
     "tf_for_signal": "1m",
     "xcap": 40.0,
@@ -84,7 +73,6 @@ DEFAULT_CONFIG = {
     "require_multitimeframe_confirm": False
 }
 
-# ---------- HTTP helper (sync requests wrapped) ----------
 def http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
     try:
         r = requests.get(url, timeout=timeout)
@@ -95,9 +83,7 @@ def http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
 async def async_http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
     return await asyncio.to_thread(http_get, url, timeout)
 
-# ---------- Dexscreener helpers ----------
 async def fetch_pair_json(url: str) -> Dict[str,Any]:
-    # Dexscreener pair page -> .json
     if not url:
         return {}
     if url.endswith("/"):
@@ -131,11 +117,9 @@ async def fetch_top_pairs_from_api(chain: str, limit: int = 200) -> List[Dict[st
     return []
 
 async def fetch_new_pairs_from_api(chain: str, since_seconds: int = 600) -> List[Dict[str,Any]]:
-    # heuristic: reuse top pairs as new candidates
     pairs = await fetch_top_pairs_from_api(chain, limit=500)
     return pairs[:50]
 
-# ---------- Strategy: evaluate (Крипта1) ----------
 def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any]) -> Tuple[str, Optional[float], Dict[str,Any]]:
     meta: Dict[str,Any] = {}
     try:
@@ -221,7 +205,6 @@ def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any])
         meta["error"] = str(e)
         return "NO", None, meta
 
-# ---------- Scanners ----------
 async def new_pairs_watcher(app, cfg):
     chain = "solana"
     interval = int(cfg.get("new_pairs_interval_seconds", 10))
@@ -286,7 +269,6 @@ async def top_pairs_scanner(app, cfg):
             logger.exception("top_pairs_scanner err %s", e)
         await asyncio.sleep(interval)
 
-# ---------- Telegram handlers ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Крипта1 автономный сканер запущен. /last /report /pairs")
 
@@ -305,7 +287,6 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Scanner uses Dexscreener API for pairs (no local pairs.json required).")
 
-# ---------- Main ----------
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -321,7 +302,6 @@ def main():
     app.add_handler(CommandHandler("pairs", cmd_pairs))
 
     async def on_start(app):
-        # create background tasks
         app.create_task(new_pairs_watcher(app, cfg))
         app.create_task(top_pairs_scanner(app, cfg))
         logger.info("Background scanner tasks started.")

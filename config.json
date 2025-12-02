@@ -2,17 +2,5 @@
   "scan_interval_seconds": 60,
   "new_pairs_interval_seconds": 10,
   "timeframes": ["1m","5m"],
-  "alert_chat_id": null,
-  "ADMIN_CHAT_ID": null,
-  "min_volume_usd": 50,
-  "volume_spike_multiplier": 3.0,
-  "min_buyers_recent": 8,
-  "required_buyers_for_strong": 15,
-  "consecutive_bull_candles": 2,
-  "max_recent_drawdown_pct": 30,
-  "prefer_hours": {"start":3,"end":8},
-  "tf_for_signal": "1m",
-  "xcap": 40.0,
-  "top_pairs_limit": 200,
-  "require_multitimeframe_confirm": false
+  "alert_chat_id": null
 }

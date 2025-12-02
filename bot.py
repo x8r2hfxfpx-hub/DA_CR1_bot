@@ -1,9 +1,8 @@
 # bot.py
-# Автономный гибридный сканер "Крипта 1" для Dexscreener (Solana)
-# Вариант C: new pairs watcher + periodic top pairs scanner
-# Зависимости: python-telegram-bot==20.3, requests
-# Файлы конфигурации: config.json, pairs.json (опционально)
-# Переменные окружения: BOT_TOKEN (обязательно), ADMIN_CHAT_ID (опционально)
+# Полный рабочий "Крипта 1" сканер — адаптирован под python-telegram-bot v20+
+# Требования: requirements.txt (ptb 20.7, requests, aiohttp)
+# ENV: BOT_TOKEN (обязательно), ADMIN_CHAT_ID (опционально)
+# Файлы: config.json (опционально), stats.json (создаётся автоматически)
 
 import os
 import json
@@ -16,38 +15,32 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# -----------------------
-# Настройка логов
-# -----------------------
+# ---------- Логи ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Крипта1")
 
-# -----------------------
-# Файлы / константы
-# -----------------------
+# ---------- Константы / файлы ----------
 STATS_FILE = "stats.json"
-PAIRS_FILE = "pairs.json"        # опционально: заранее подготовленный список
 CONFIG_FILE = "config.json"
 CODEWORD = "Крипта 1"
 
-# -----------------------
-# Утилиты: чтение/запись json
-# -----------------------
+# ---------- Утилиты ----------
 def load_json_safe(path: str, default):
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=2)
         return default
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except:
+            return default
 
 def save_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# -----------------------
-# Статистика (постоянно)
-# -----------------------
+# ---------- Статистика ----------
 def load_stats():
     default = {"codeword": CODEWORD, "entries": [], "summary": {"total":0,"correct":0,"incorrect":0}}
     return load_json_safe(STATS_FILE, default)
@@ -62,41 +55,36 @@ def record_entry(pair_label: str, url: str, chain: str, tf: str, answer: str, x_
         "url": url,
         "chain": chain,
         "tf": tf,
-        "answer": answer,  # "YES" or "NO"
+        "answer": answer,
         "x_multiplier": x_multiplier,
         "meta": meta,
         "timestamp": int(time.time())
     }
     data["entries"].append(entry)
-    data["summary"]["total"] += 1
+    data["summary"]["total"] = data["summary"].get("total",0) + 1
     save_stats(data)
-    logger.info("Recorded: %s %s %s => %s x=%s", pair_label, chain, tf, answer, x_multiplier)
+    logger.info("REC: %s %s %s => %s x=%s", pair_label, chain, tf, answer, x_multiplier)
 
-# -----------------------
-# Default config (если нет config.json)
-# -----------------------
+# ---------- Default config ----------
 DEFAULT_CONFIG = {
     "scan_interval_seconds": 60,
     "new_pairs_interval_seconds": 10,
     "timeframes": ["1m","5m"],
     "alert_chat_id": None,
-    "ADMIN_CHAT_ID": None,
     "min_volume_usd": 50,
     "volume_spike_multiplier": 3.0,
     "min_buyers_recent": 8,
     "required_buyers_for_strong": 15,
     "consecutive_bull_candles": 2,
     "max_recent_drawdown_pct": 30,
-    "prefer_hours": {"start":3,"end":8},  # optional: UTC hours (can be null)
+    "prefer_hours": None,
     "tf_for_signal": "1m",
     "xcap": 40.0,
-    "top_pairs_limit": 200,  # how many top pairs to scan periodically
-    "require_multitimeframe_confirm": False  # optional confirm on multiple TFs
+    "top_pairs_limit": 200,
+    "require_multitimeframe_confirm": False
 }
 
-# -----------------------
-# HTTP helpers (non-blocking wrapper using asyncio.to_thread)
-# -----------------------
+# ---------- HTTP helper (sync requests wrapped) ----------
 def http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
     try:
         r = requests.get(url, timeout=timeout)
@@ -107,12 +95,11 @@ def http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
 async def async_http_get(url: str, timeout: int = 10) -> Tuple[int, str]:
     return await asyncio.to_thread(http_get, url, timeout)
 
-# -----------------------
-# Dexscreener fetch helpers
-# - fetch pair JSON: { ... } from /{chain}/{pair}.json
-# - fetch top pairs / new pairs via public API (api.dexscreener.com)
-# -----------------------
+# ---------- Dexscreener helpers ----------
 async def fetch_pair_json(url: str) -> Dict[str,Any]:
+    # Dexscreener pair page -> .json
+    if not url:
+        return {}
     if url.endswith("/"):
         url = url[:-1]
     json_url = url + ".json"
@@ -121,69 +108,54 @@ async def fetch_pair_json(url: str) -> Dict[str,Any]:
         try:
             return json.loads(text)
         except Exception as e:
-            logger.debug("JSON parse failed %s: %s", json_url, e)
+            logger.debug("parse json err %s %s", json_url, e)
     return {}
 
 async def fetch_top_pairs_from_api(chain: str, limit: int = 200) -> List[Dict[str,Any]]:
-    """
-    Uses Dexscreener public API: https://api.dexscreener.com/latest/dex/pairs?chain=solana
-    Response: {"pairs": [ { "pairUrl": "...", "pair": {...} }, ... ]}
-    """
     api = f"https://api.dexscreener.com/latest/dex/pairs?chain={chain}"
     status, text = await async_http_get(api, timeout=10)
     if status == 200:
         try:
             data = json.loads(text)
             pairs = data.get("pairs") or []
-            # limit and map to simplified structure
-            res = []
+            out = []
             for p in pairs[:limit]:
-                res.append({
-                    "label": p.get("pair","").replace(":", "_") or p.get("pairLabel") or p.get("pairUrl"),
+                out.append({
+                    "label": p.get("pair") or p.get("pairLabel") or p.get("pairUrl"),
                     "url": p.get("pairUrl") or p.get("url") or "",
                     "chain": chain
                 })
-            return res
+            return out
         except Exception as e:
-            logger.debug("fetch_top_pairs parse error: %s", e)
+            logger.debug("fetch_top_pairs parse err %s", e)
     return []
 
 async def fetch_new_pairs_from_api(chain: str, since_seconds: int = 600) -> List[Dict[str,Any]]:
-    """
-    A lightweight attempt to get 'new' pairs - we reuse top pairs and filter by creation time if available.
-    Dexscreener API may not provide exact creation timestamp; method uses heuristics.
-    """
+    # heuristic: reuse top pairs as new candidates
     pairs = await fetch_top_pairs_from_api(chain, limit=500)
-    # heuristic: treat first N as 'new-ish' — we'll just return first 30 as candidates
     return pairs[:50]
 
-# -----------------------
-# Strategy evaluation function (Крипта1) - strict YES/NO + x estimate + meta
-# -----------------------
+# ---------- Strategy: evaluate (Крипта1) ----------
 def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any]) -> Tuple[str, Optional[float], Dict[str,Any]]:
     meta: Dict[str,Any] = {}
     try:
-        # read common fields
         pair = data.get("pair") or data.get("pairInfo") or {}
         vol24 = float(pair.get("volumeUsd24h") or pair.get("volume") or 0.0)
         price = None
         try:
             price = float(pair.get("priceUsd") or pair.get("price"))
-        except Exception:
+        except:
             price = None
         meta["vol24"] = vol24
         meta["price"] = price
 
-        # 1) min volume filter
         if vol24 < cfg.get("min_volume_usd", 50):
             return "NO", None, meta
 
-        # 2) recent volume spike from chart data
         chart = data.get("chart") or {}
         points = chart.get("data") if isinstance(chart, dict) else data.get("chartData") or []
         recent_vol = 0.0
         if isinstance(points, list) and len(points) > 0:
-            # points may be list of [ts, price, vol] or dicts
             last_points = points[-5:]
             for p in last_points:
                 if isinstance(p, (list,tuple)) and len(p) >= 3:
@@ -197,15 +169,12 @@ def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any])
         meta["spike_mult"] = spike_mult
         volume_spike = spike_mult >= cfg.get("volume_spike_multiplier", 3.0)
 
-        # 3) buyers cluster: parse recent trades section
         buyers = set()
         txs = data.get("recentTrades") or data.get("recentTxs") or data.get("trades") or []
         if isinstance(txs, dict):
-            # maybe structure { 'buys': [...], 'sells': [...] }
             txs = txs.get("buys") or txs.get("recent") or []
         if isinstance(txs, list):
-            recent_slice = txs[-50:]
-            for t in recent_slice:
+            for t in txs[-50:]:
                 addr = None
                 if isinstance(t, dict):
                     addr = t.get("from") or t.get("buyer") or t.get("addr")
@@ -219,7 +188,6 @@ def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any])
         strong_buyers = buyers_count >= cfg.get("required_buyers_for_strong", 15)
         enough_buyers = buyers_count >= cfg.get("min_buyers_recent", 8)
 
-        # 4) structure: check bull candles from points (close increases)
         bull_candles = 0
         closes = []
         if isinstance(points, list):
@@ -240,7 +208,6 @@ def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any])
         meta["bull_candles"] = bull_candles
         structure_ok = bull_candles >= cfg.get("consecutive_bull_candles", 2)
 
-        # 5) final decision logic (conservative)
         if strong_buyers and volume_spike:
             est = min(cfg.get("xcap",40.0), max(1.0, spike_mult * (vol24 / 1000.0)))
             return "YES", round(est,2), meta
@@ -250,31 +217,15 @@ def evaluate_strategy_from_dex(data: Dict[str,Any], tf: str, cfg: Dict[str,Any])
             return "YES", round(est,2), meta
 
         return "NO", None, meta
-
     except Exception as e:
         meta["error"] = str(e)
         return "NO", None, meta
 
-# -----------------------
-# Scanner tasks
-# -----------------------
+# ---------- Scanners ----------
 async def new_pairs_watcher(app, cfg):
-    """
-    Частая проверка новых пар (каждые new_pairs_interval_seconds),
-    и немедленное применение стратегии.
-    """
     chain = "solana"
     interval = int(cfg.get("new_pairs_interval_seconds", 10))
     seen_urls = set()
-    # load initial from pairs.json if exists
-    if os.path.exists(PAIRS_FILE):
-        try:
-            p = load_json_safe(PAIRS_FILE, [])
-            for el in p:
-                seen_urls.add(el.get("url"))
-        except Exception:
-            pass
-
     while True:
         try:
             candidates = await fetch_new_pairs_from_api(chain, since_seconds=600)
@@ -283,42 +234,34 @@ async def new_pairs_watcher(app, cfg):
                 label = cand.get("label") or url
                 if not url or url in seen_urls:
                     continue
-                # mark seen immediately to avoid duplicates
                 seen_urls.add(url)
-                # fetch pair JSON and evaluate
                 data = await fetch_pair_json(url)
                 tf = cfg.get("tf_for_signal", "1m")
                 ans, x, meta = evaluate_strategy_from_dex(data, tf, cfg)
+                text = f"#{CODEWORD} {label} {tf} => {ans} x={x} meta={meta}"
                 if ans == "YES":
                     chat = cfg.get("alert_chat_id") or os.getenv("ADMIN_CHAT_ID")
-                    text = (
-                        f"#{CODEWORD} SIGNAL (NEW)\nPair: {label}\nChain: {chain}\nTF: {tf}\nDecision: {ans}\nX: {x}\nURL: {url}\nmeta: {meta}"
-                    )
                     if chat:
                         try:
                             await app.bot.send_message(chat_id=chat, text=text)
                         except Exception as e:
-                            logger.exception("Send message failed: %s", e)
+                            logger.exception("send msg err %s", e)
                     else:
-                        logger.info("Signal (no chat configured): %s", text)
+                        logger.info("SIGNAL: %s", text)
                     record_entry(label, url, chain, tf, ans, x, meta)
-                # small throttle
                 await asyncio.sleep(0.3)
         except Exception as e:
-            logger.exception("new_pairs_watcher error: %s", e)
+            logger.exception("new_pairs_watcher err %s", e)
         await asyncio.sleep(interval)
 
 async def top_pairs_scanner(app, cfg):
-    """
-    Периодический скан топ пар (каждые scan_interval_seconds).
-    """
     chain = "solana"
     interval = int(cfg.get("scan_interval_seconds", 60))
     limit = int(cfg.get("top_pairs_limit", 200))
     while True:
         try:
             top_pairs = await fetch_top_pairs_from_api(chain, limit=limit)
-            logger.info("Top scanner: got %d pairs", len(top_pairs))
+            logger.info("Top scanner fetched %d", len(top_pairs))
             for p in top_pairs:
                 url = p.get("url") or ""
                 label = p.get("label") or url
@@ -327,54 +270,42 @@ async def top_pairs_scanner(app, cfg):
                 data = await fetch_pair_json(url)
                 for tf in cfg.get("timeframes", ["1m"]):
                     ans, x, meta = evaluate_strategy_from_dex(data, tf, cfg)
+                    text = f"#{CODEWORD} {label} {tf} => {ans} x={x} meta={meta}"
                     if ans == "YES":
                         chat = cfg.get("alert_chat_id") or os.getenv("ADMIN_CHAT_ID")
-                        text = (
-                            f"#{CODEWORD} SIGNAL (TOP)\nPair: {label}\nChain: {chain}\nTF: {tf}\nDecision: {ans}\nX: {x}\nURL: {url}\nmeta: {meta}"
-                        )
                         if chat:
                             try:
                                 await app.bot.send_message(chat_id=chat, text=text)
                             except Exception as e:
-                                logger.exception("Send message failed: %s", e)
+                                logger.exception("send msg err %s", e)
                         else:
-                            logger.info("Signal (no chat): %s", text)
+                            logger.info("SIGNAL: %s", text)
                         record_entry(label, url, chain, tf, ans, x, meta)
-                # small pause per pair
                 await asyncio.sleep(0.2)
         except Exception as e:
-            logger.exception("top_pairs_scanner error: %s", e)
+            logger.exception("top_pairs_scanner err %s", e)
         await asyncio.sleep(interval)
 
-# -----------------------
-# Telegram command handlers
-# -----------------------
+# ---------- Telegram handlers ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Крипта1 автономный сканер запущен. /last /report /pairs")
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = load_stats()["summary"]
-    await update.message.reply_text(f"Total={s['total']} correct={s['correct']} incorrect={s['incorrect']}")
+    s = load_stats().get("summary", {})
+    await update.message.reply_text(f"Total={s.get('total',0)} correct={s.get('correct',0)} incorrect={s.get('incorrect',0)}")
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    entries = load_stats()["entries"][-10:]
+    entries = load_stats().get("entries", [])[-10:]
     lines = []
-    # index relative to total entries
-    base = max(0, len(load_stats()["entries"]) - 10)
+    base = max(0, len(load_stats().get("entries",[])) - 10)
     for i, e in enumerate(entries, start=base):
         lines.append(f"#{i} {e['pair']} {e['tf']} {e['answer']} x={e.get('x_multiplier')}")
     await update.message.reply_text("\n".join(lines) if lines else "No entries")
 
 async def cmd_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if os.path.exists(PAIRS_FILE):
-        p = load_json_safe(PAIRS_FILE, [])
-        await update.message.reply_text(f"Pairs file exists with {len(p)} entries.")
-    else:
-        await update.message.reply_text("No pairs.json found. Scanner uses Dexscreener API for new/top pairs.")
+    await update.message.reply_text("Scanner uses Dexscreener API for pairs (no local pairs.json required).")
 
-# -----------------------
-# Main
-# -----------------------
+# ---------- Main ----------
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -384,22 +315,20 @@ def main():
 
     app = ApplicationBuilder().token(token).build()
 
-    # register commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(CommandHandler("pairs", cmd_pairs))
 
-    # background tasks on start
     async def on_start(app):
-        # start both tasks
+        # create background tasks
         app.create_task(new_pairs_watcher(app, cfg))
         app.create_task(top_pairs_scanner(app, cfg))
-        logger.info("Background scanner tasks created.")
+        logger.info("Background scanner tasks started.")
 
     app.post_init = on_start
 
-    logger.info("Starting bot (polling)...")
+    logger.info("Starting polling...")
     app.run_polling()
 
 if __name__ == "__main__":
